@@ -1,0 +1,18 @@
+name = "Scratch"
+uuid = "a79a821e-1231-42e6-8e07-bd79467cbce6"
+authors = ["Jan Kocka <kockahonza@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+Agents = "46ada45e-f475-11e8-01d0-f70cc89e6671"
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+Cthulhu = "f68482b8-f384-11e8-15f7-abe071a5a75f"
+GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
+PyFormattedStrings = "5f89f4a4-a228-4886-b223-c468a82ed5b9"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+
+[compat]
+Cthulhu = "2.16.1"
+PyFormattedStrings = "0.1.12"
