@@ -6,40 +6,50 @@ using GLMakie
 ################################################################################
 # Define the main and somewhat general building blocks
 ################################################################################
-@agent struct Cell(GridAgent{2})
-    size::Float64 # starts at 0 and growing to 1. will reset to 0 and replicate itself
-    growth_per_consumed_unit::Float64 # increases size by this * the amount of consumed resource
-    consumes::Int # specifies which resource is consumed/produced
-    produces::Int
-    consumption_rate::Float64 # specifies the rate or consumption/production,
-    production_rate::Float64  # aka this much is cons./prod. per 1 unit of time
-    random_move_rate::Float64 # the rate at which the cell randomly moves perunit time
+@agent struct Cell(GridAgent{3})
+    size::Vector{Float64}
+    type::Int
+    willbud::Bool
+    dead::Bool
 end
 
 struct ModelProperties{N} # N is the number of resources
     dt::Float64 # the finite difference spacings
     dx::Float64
     resource_grid_factor::Int # specifies how many space grid cells make one resource one
-    resource_spacesize::Tuple{Int,Int} # the resource grid dimensions
+    # physics info
+    dependencies::Array{Bool,3} # this is num types by num resources by (uptake, release)
+    type_deathrates::Vector{Float64}
+    type_reproductionrates::Vector{Float64}
+    resource_vmaxs::Vector{Float64}
+    resource_kms::Vector{Float64}
+    resource_alphas::Vector{Float64}
+    resource_gammas::Vector{Float64}
+    resource_spacesize::Tuple{Int,Int,Int} # the resource grid dimensions
     resource_Ds::SVector{N,Float64} # the diffusion parameters for each resource
-    resources::SVector{N,Matrix{Float64}} # matrices of available resources
+    resources::SVector{N,Array{Float64,3}} # matrices of available resources
     # internals
     res_grid_dx::Float64
-    resources_temp::SVector{N,Matrix{Float64}} # just a preallocated temp var
-    resource_alphas::SVector{N,Float64} # master equation diffusion coeffs
+    resources_temp::SVector{N,Array{Float64,3}} # just a preallocated temp var
+    resources_temp2::SVector{N,Array{Float64,3}} # just a preallocated temp var
+    resource_betas::SVector{N,Float64} # master equation diffusion coeffs
 end
-function make_model(space, dt, dx,
+function make_model(space_size, dt, dx,
+    dependencies, type_deathrates, type_reproductionrates,
+    resource_vmaxs, resource_kms, resource_alphas, resource_gammas,
     resource_grid_factor, resource_Ds, resources;
-    (agent_step!)=cell_step!,
-    (model_step!)=mstep_diffusion!
+    (step!)=step1!
 )
+    dims = (space_size, space_size, space_size)
+    space = GridSpace(dims; periodic=false, metric=:chebyshev)
+
     if !all(x -> x == 0, mod.(spacesize(space), resource_grid_factor))
         throw(ArgumentError("space dimensions are not all divisible by resource_grid_factor"))
     end
     res_spacesize = div.(spacesize(space), resource_grid_factor)
 
     resources_ = map(resources) do res
-        if isa(res, Matrix)
+        if isa(res, Array)
             if size(res) == res_spacesize
                 res
             else
@@ -53,14 +63,15 @@ function make_model(space, dt, dx,
     end
 
     res_grid_dx = resource_grid_factor * dx
-    alphas = resource_Ds ./ ((res_grid_dx^2) / dt)
-    properties = ModelProperties(dt, dx, resource_grid_factor, res_spacesize, resource_Ds, resources_,
-        res_grid_dx, map(similar, resources_), alphas
+    betas = resource_Ds ./ ((res_grid_dx^2) / dt)
+    properties = ModelProperties(dt, dx, dependencies,
+        type_deathrates, type_reproductionrates, resource_vmaxs, resource_kms, resource_alphas, resource_gammas,
+        resource_grid_factor, res_spacesize, resource_Ds, resources_,
+        res_grid_dx, map(similar, resources_), map(similar, resources_), betas
     )
 
     StandardABM(Cell, space;
-        agent_step!,
-        model_step!,
+        (model_step!)=step!,
         properties
     )
 end
@@ -74,53 +85,37 @@ real_to_res_pos(model, pos) = real_to_res_pos(model.resource_grid_factor, pos)
 ################################################################################
 # The evolution steps
 ################################################################################
-function cell_step!(cell, model)
-    res_pos = real_to_res_pos(model, cell.pos)
-
-    # produce
-    model.resources[cell.produces][res_pos...] += cell.production_rate * model.dt
-
-    # consume and grow
-    consumed = min(cell.consumption_rate * model.dt, model.resources[cell.consumes][res_pos...])
-    model.resources[cell.consumes][res_pos...] -= consumed
-    cell.size += consumed * cell.growth_per_consumed_unit
-
-    # maybe replicate
-    if cell.size >= 1.0
-        cell.size = 0.0
-        replicate!(cell, model)
-    end
-
-    # randomly move
-    if rand(abmrng(model)) < (cell.random_move_rate * model.dt)
-        dir = rand(abmrng(model), SA[(1, 0), (-1, 0), (0, 1), (0, -1)])
-        walk!(cell, dir, model)
-    end
-end
-
 """
 Only does diffusion of each resource according to its coefficient on the coarser
 resource grid.
 """
-function mstep_diffusion!(model)
-    for (res, temp, alpha) in zip(model.resources, model.resources_temp, model.resource_alphas)
+function mprep_diffusion!(model)
+    for (res, temp, beta) in zip(model.resources, model.resources_temp, model.resource_betas)
         for x in 1:model.resource_spacesize[1]
             for y in 1:model.resource_spacesize[2]
-                temp[x, y] = res[x, y]
-                if x != 1
-                    temp[x, y] += alpha * (res[x-1, y] - res[x, y])
-                end
-                if x != model.resource_spacesize[1]
-                    temp[x, y] += alpha * (res[x+1, y] - res[x, y])
-                end
-                if y != 1
-                    temp[x, y] += alpha * (res[x, y-1] - res[x, y])
-                end
-                if y != model.resource_spacesize[2]
-                    temp[x, y] += alpha * (res[x, y+1] - res[x, y])
-                end
-                if temp[x, y] < 0.0
-                    @error f"Getting a negative resource value of {temp[x,y]}! This is very likely a finite difference issue from dt being too big or dx too small"
+                for z in 1:model.resource_spacesize[3]
+                    temp[x, y, z] = res[x, y, z]
+                    if x != 1
+                        temp[x, y, z] += beta * (res[x-1, y, z] - res[x, y, z])
+                    end
+                    if x != model.resource_spacesize[1]
+                        temp[x, y, z] += beta * (res[x+1, y, z] - res[x, y, z])
+                    end
+                    if y != 1
+                        temp[x, y, z] += beta * (res[x, y-1, z] - res[x, y, z])
+                    end
+                    if y != model.resource_spacesize[2]
+                        temp[x, y, z] += beta * (res[x, y+1, z] - res[x, y, z])
+                    end
+                    if z != 1
+                        temp[x, y, z] += beta * (res[x, y, z-1] - res[x, y, z])
+                    end
+                    if x != model.resource_spacesize[3]
+                        temp[x, y, z] += beta * (res[x, y, z+1] - res[x, y, z])
+                    end
+                    if temp[x, y, z] < 0.0
+                        @error f"Getting a negative resource value of {temp[x,y]}! This is very likely a finite difference issue from dt being too big or dx too small"
+                    end
                 end
             end
         end
@@ -128,33 +123,103 @@ function mstep_diffusion!(model)
     end
 end
 
+const inplane_offsets = [(0, -1, 0), (-1, -1, 0), (-1, 0, 0), (-1, 1, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0), (1, -1, 0)]
+const offplane_offsets = [(0, 0, 1), (0, -1, 1), (-1, -1, 1), (-1, 0, 1), (-1, 1, 1), (0, 1, 1), (1, 1, 1), (1, 0, 1), (1, -1, 1)]
+
+function step1!(model)
+    mprep_diffusion!(model)
+
+    deps = model.dependencies
+
+    # do uptake, release
+    for nn in 1:size(model.dependencies)[2]
+        for cell in allagents(model)
+            if cell.dead
+                continue
+            end
+            cell_pos = real_to_res_pos(cell.pos, model)
+            if deps[cell.type, nn, 1]
+                uptake = (model.resource_vmaxs[nn] * model.resources[cell_pos] * model.dt) / (model.resources[cell_pos] + model.resource_kms[nn])
+                cell.size[nn] += uptake
+                model.resources[nn][cell_pos] -= uptake
+            end
+            if deps[cell.type, nn, 2]
+                release = model.resource_gammas[nn] * model.dt
+                model.resources[nn][cell_pos] += release
+            end
+        end
+    end
+
+    # do life/death
+    for cell in allagents(model)
+        if cell.dead
+            continue
+        end
+        if rand(abmrng(model)) < model.type_deathrates[cell.type] * model.dt
+            cell.dead = true
+        else
+            cell.willbud = true
+            for nn in 1:size(model.dependencies)[2]
+                if deps[cell.type, nn, 1] && cell.size[nn] < model.resource_alphas[nn]
+                    cell.willbud = false
+                    break
+                end
+            end
+        end
+    end
+
+    for cell in allagents(model)
+        if cell.willbud
+            new_pos = nothing
+            for offset in shuffle(inplane_offsets)
+                pos = cell.pos .+ offset
+                if isempty(pos, model)
+                    new_pos = pos
+                    break
+                end
+            end
+            for offset in shuffle(offplane_offsets)
+                pos = cell.pos .+ offset
+                if isempty(pos, model)
+                    new_pos = pos
+                    break
+                end
+            end
+            if !isnothing(new_pos)
+                cell.size .= 0.0
+                replicate!(cell, model; pos=new_pos)
+            else
+                cell.dead = true
+            end
+        end
+    end
+end
+
 ################################################################################
 # Some running examples
 ################################################################################
-"""
-This makes the basic 2 interdependent species model
-"""
-function mmtest(dt, dx;
-    space_size=100,
-    rgf=5,
-    num_s1=10,
-    num_s2=10,
-    res1_D=1.0,
-    res2_D=1.0,
-    pp=10
-)
-    dims = (space_size, space_size)
-    space = GridSpace(dims; periodic=false, metric=:chebyshev)
+function mmtest()
+    dependencies = zeros(2, 2, 2)
+    dependencies[1, 1, 1] = true
+    dependencies[1, 2, 2] = true
 
-    model = make_model(space, dt, dx, rgf, SA[res1_D, res2_D], SA[0.0, 0.0])
+    dependencies[2, 2, 1] = true
+    dependencies[2, 1, 2] = true
 
-    for _ in 1:num_s1
-        add_agent!(model, 0.0, 1000.0, 1, 2, 1.0, 1.0, pp)
-    end
+    alphas = [5.4, 3.1]
+    km = [2.1e6, 1.3e6]
+    gamma = [0.4, 0.26]
 
-    for _ in 1:num_s2
-        add_agent!(model, 0.0, 1.0, 2, 1, 1.0, 1.0, pp)
-    end
+    reproduction = [0.51, 0.44]
+    death = [0.021, 0.015]
+
+    vm = reproduction .* alphas
+
+    model = make_model(100, 0.001, 1.0, dependencies, death, reproduction, vm, km, alphas, gamma, 5, [0.1, 0.1], [0.0, 0.0])
+
+    # for _ in 1:num_s2
+    #     add_agent!(model, 0.0, 1.0, 2, 1, 1.0, 1.0, pp)
+    # end
 
     model
 end
