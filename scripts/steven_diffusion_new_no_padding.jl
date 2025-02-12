@@ -348,6 +348,14 @@ function find_bud_pos(cell, model)
     return nothing
 end
 
+# make model
+# m = build_model()
+# run it for n steps:
+# @time step!(m, n)
+# plot nutrients with colorbar:
+# f = Figure(); ax = Axis(f[1,1]); hm = heatmap!(ax, m.nutrients[1][50,:,:]); Colorbar(f[1,2],hm); f
+# plot the abm
+# xx = abmplot(m; agent_size=1, agent_color=c->c.strain_id); xx[1]
 
 
 function main()
@@ -361,15 +369,15 @@ function main()
 
     model
 
-    # @profview adf, _ = run!(model, 1; adata)
+    @profview adf, _ = run!(model, 1; adata)
 
 
     # # Run 100 model steps
-    # @assert false "Stop here not to run the next part"
-    #
-    # model = build_model(; n_diffusion_steps_per_model_step=360)
-    # adata = [:pos, :alive, :quiescence_flag, :strain_id, :internal_nutrients]
-    # @time adf, _ = run!(model, 240; adata)
-    # adf[end-10:end, :] # display only the last few rows
+    @assert false "Stop here not to run the next part"
+
+    model = build_model(; n_diffusion_steps_per_model_step=360)
+    adata = [:pos, :alive, :quiescence_flag, :strain_id, :internal_nutrients]
+    @time adf, _ = run!(model, 240; adata)
+    adf[end-10:end, :] # display only the last few rows
     # 232.001167 seconds (505.80 k allocations: 108.956 MiB, 0.03% gc time)
 end
